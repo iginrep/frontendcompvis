@@ -66,7 +66,7 @@ export default function MonitorPage() {
           const base64String = (reader.result as string).split(',')[1]
 
           try {
-            const response = await fetch('http://127.0.0.1:7000/face/uploadmany', {
+            const response = await fetch('http://127.0.0.1:8000/face/uploadmany', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
