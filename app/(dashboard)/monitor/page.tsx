@@ -1,10 +1,11 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useRef, useEffect } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Play, Square, User } from "lucide-react"
+import { useCamera } from "../CameraContext"
 
 interface DetectionResult {
   user_id?: string
@@ -18,117 +19,31 @@ interface DetectionResult {
   }
 }
 
-interface ApiResponse {
-  status: string
-  results: DetectionResult[]
-}
-
-// Generate random MongoDB ObjectID
-const generateObjectId = () => {
-  const timestamp = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0')
-  const randomHex = () => Math.floor(Math.random() * 16).toString(16)
-  return timestamp + Array.from({ length: 16 }, randomHex).join('')
-}
-
 export default function MonitorPage() {
-  const [isLive, setIsLive] = useState(false)
-  const [currentDetections, setCurrentDetections] = useState<any[]>([])
+  const { isLive, currentDetections, latestResults, startCamera, stopCamera, getVideoStream } = useCamera()
   const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const captureIntervalRef = useRef<NodeJS.Timeout | null>(null)
-  const animationFrameRef = useRef<number | null>(null)
-  const isLiveRef = useRef<boolean>(false)
 
-  // Fetch user name by ID
-  const fetchUserName = async (userId: string): Promise<string> => {
-    try {
-      const response = await fetch(`http://127.0.0.1:8000/users/${userId}`)
-      if (response.ok) {
-        const data = await response.json()
-        return data.name || `User ${userId.substring(0, 8)}`
+  // Sync video stream when component mounts or isLive changes
+  useEffect(() => {
+    if (videoRef.current && isLive) {
+      const stream = getVideoStream()
+      if (stream && videoRef.current.srcObject !== stream) {
+        videoRef.current.srcObject = stream
       }
-    } catch (error) {
-      console.error('Error fetching user name:', error)
+    } else if (videoRef.current && !isLive) {
+      videoRef.current.srcObject = null
     }
-    return `User ${userId.substring(0, 8)}`
-  }
+  }, [isLive, getVideoStream])
 
-  // Fetch visitor name by ID
-  const fetchVisitorName = async (visitorId: string): Promise<string> => {
-    try {
-      const response = await fetch(`http://127.0.0.1:8000/users/visitor/${visitorId}`)
-      if (response.ok) {
-        const data = await response.json()
-        return data.name || `Visitor ${visitorId.substring(0, 8)}`
-      }
-    } catch (error) {
-      console.error('Error fetching visitor name:', error)
+  // Update bounding boxes when results change
+  useEffect(() => {
+    if (latestResults.length > 0) {
+      drawBoundingBoxes(latestResults)
+    } else {
+      clearBoundingBoxes()
     }
-    return `Visitor ${visitorId.substring(0, 8)}`
-  }
-
-  // Capture and send frame to API
-  const captureAndSendFrame = async () => {
-    // Stop if camera is not live
-    if (!isLiveRef.current) return
-    if (!videoRef.current || !canvasRef.current) return
-
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d', { alpha: false })
-    if (!ctx) return
-
-    // Set canvas to target resolution
-    canvas.width = 1280
-    canvas.height = 720
-
-    // Draw current video frame
-    ctx.drawImage(video, 0, 0, 1280, 720)
-
-    // Convert to JPEG Base64 with 85% quality
-    canvas.toBlob(
-      async (blob) => {
-        if (!blob) return
-
-        const reader = new FileReader()
-        reader.onloadend = async () => {
-          const base64String = (reader.result as string).split(',')[1]
-
-          try {
-            const response = await fetch('http://127.0.0.1:8000/face/uploadmany', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                class_id: generateObjectId(),
-                image_base64: base64String,
-              }),
-            })
-
-            if (response.ok) {
-              const data: ApiResponse = await response.json()
-              
-              if (data.status === 'success' && data.results.length > 0) {
-                drawBoundingBoxes(data.results)
-                updateLogs(data.results)
-              } else {
-                clearBoundingBoxes()
-                setCurrentDetections([])
-              }
-            }
-          } catch (error) {
-            console.error('API Error:', error)
-          }
-        }
-        reader.readAsDataURL(blob)
-      },
-      'image/jpeg',
-      0.85
-    )
-  }
+  }, [latestResults])
 
   // Draw bounding boxes on overlay canvas
   const drawBoundingBoxes = (results: DetectionResult[]) => {
@@ -200,96 +115,6 @@ export default function MonitorPage() {
     }
   }
 
-  // Update current detections (not logs)
-  const updateLogs = async (results: DetectionResult[]) => {
-    const detections = await Promise.all(
-      results.map(async (result, index) => {
-        let name = ''
-        let type = ''
-        let distance = 'NULL'
-        
-        if (result.user_id) {
-          const userName = await fetchUserName(result.user_id)
-          name = userName
-          type = 'Student'
-          distance = result.distance.toFixed(3)
-        } else if (result.visitor_id) {
-          const visitorName = await fetchVisitorName(result.visitor_id)
-          name = visitorName
-          type = 'Visitor'
-          // Check if distance exists (recognized visitor) or NULL (new visitor)
-          distance = result.distance !== null && result.distance !== undefined ? result.distance.toFixed(3) : 'NULL'
-        }
-
-        return {
-          id: index,
-          name,
-          type,
-          distance,
-        }
-      })
-    )
-
-    setCurrentDetections(detections)
-  }
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: 1280, height: 720, frameRate: 30 },
-        audio: false 
-      })
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        streamRef.current = stream
-        isLiveRef.current = true
-        setIsLive(true)
-        
-        // Start capturing frames every 2 seconds
-        captureIntervalRef.current = setInterval(() => {
-          captureAndSendFrame()
-        }, 2000)
-      }
-    } catch (error) {
-      console.error("Error accessing camera:", error)
-      alert("Unable to access camera. Please check permissions.")
-    }
-  }
-
-  const stopCamera = () => {
-    // Set live ref to false immediately to stop any pending captures
-    isLiveRef.current = false
-    
-    // Clear capture interval
-    if (captureIntervalRef.current) {
-      clearInterval(captureIntervalRef.current)
-      captureIntervalRef.current = null
-    }
-    
-    // Stop camera stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop())
-      streamRef.current = null
-    }
-    
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-    
-    // Clear canvases and detections
-    clearBoundingBoxes()
-    setCurrentDetections([])
-    
-    setIsLive(false)
-  }
-
-  useEffect(() => {
-    return () => {
-      stopCamera()
-    }
-  }, [])
-
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-8">
       <div className="relative aspect-video bg-slate-900 rounded-3xl overflow-hidden flex flex-col items-center justify-center border-4 border-white shadow-xl">
@@ -299,10 +124,6 @@ export default function MonitorPage() {
           playsInline
           className="absolute inset-0 w-full h-full object-cover"
           style={{ display: isLive ? 'block' : 'none' }}
-        />
-        <canvas
-          ref={canvasRef}
-          className="hidden"
         />
         <canvas
           ref={overlayCanvasRef}
