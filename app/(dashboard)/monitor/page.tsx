@@ -39,9 +39,12 @@ export default function MonitorPage() {
   const streamRef = useRef<MediaStream | null>(null)
   const captureIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const animationFrameRef = useRef<number | null>(null)
+  const isLiveRef = useRef<boolean>(false)
 
   // Capture and send frame to API
   const captureAndSendFrame = async () => {
+    // Stop if camera is not live
+    if (!isLiveRef.current) return
     if (!videoRef.current || !canvasRef.current) return
 
     const video = videoRef.current
@@ -66,7 +69,7 @@ export default function MonitorPage() {
           const base64String = (reader.result as string).split(',')[1]
 
           try {
-            const response = await fetch('http://127.0.0.1:8000/face/uploadmany', {
+            const response = await fetch('http://127.0.0.1:7000/face/uploadmany', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -181,6 +184,7 @@ export default function MonitorPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         streamRef.current = stream
+        isLiveRef.current = true
         setIsLive(true)
         
         // Start capturing frames every 2 seconds
@@ -195,6 +199,9 @@ export default function MonitorPage() {
   }
 
   const stopCamera = () => {
+    // Set live ref to false immediately to stop any pending captures
+    isLiveRef.current = false
+    
     // Clear capture interval
     if (captureIntervalRef.current) {
       clearInterval(captureIntervalRef.current)
@@ -317,6 +324,6 @@ export default function MonitorPage() {
           )}
         </div>
       </div>
-    </div>
+    </div> 
   )
 }
