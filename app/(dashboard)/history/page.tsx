@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -29,12 +29,36 @@ export default function HistoryPage() {
   const [activeLogType, setActiveLogType] = useState<"student" | "visitor">("student")
   const [studentPage, setStudentPage] = useState(1)
   const [visitorPage, setVisitorPage] = useState(1)
-  
-  // Form states for Room & Schedule filter
-  const [roomNumber, setRoomNumber] = useState("")
-  const [specificDate, setSpecificDate] = useState("")
-  const [startTime, setStartTime] = useState("")
-  const [endTime, setEndTime] = useState("")
+
+  // Jadwal mengajar dari user yang login
+  const [subjects, setSubjects] = useState<{ nama_mk: string; class_id: string; waktu_mulai: string; waktu_selesai: string }[]>([]);
+  const [selectedSubject, setSelectedSubject] = useState("");
+  const [subjectDate, setSubjectDate] = useState("");
+
+  // Form states for Room & Schedule filter (pastikan selalu string)
+  const [roomNumber, setRoomNumber] = useState("");
+  const [specificDate, setSpecificDate] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
+    // Ambil jadwal_mengajar dari localStorage saat mount
+    useEffect(() => {
+      if (typeof window !== "undefined") {
+        const userStr = localStorage.getItem("user");
+        if (userStr) {
+          try {
+            const user = JSON.parse(userStr);
+            if (user && Array.isArray(user.jadwal_mengajar)) {
+              setSubjects(user.jadwal_mengajar.map((j: any) => ({
+                nama_mk: j.nama_mk,
+                class_id: j.class_id,
+                waktu_mulai: j.waktu_mulai,
+                waktu_selesai: j.waktu_selesai,
+              })));
+            }
+          } catch {}
+        }
+      }
+    }, []);
   
   // Hardcoded class ObjectId mapping (temporary solution)
   // TODO: Replace with dynamic API call when backend endpoint is ready
@@ -47,7 +71,7 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Function to fetch attendance data
+  // Function to fetch attendance data (by room/manual)
   const fetchAttendanceData = async () => {
     if (!roomNumber || !specificDate || !startTime || !endTime) {
       setError("Please fill in all fields")
@@ -60,9 +84,8 @@ export default function HistoryPage() {
     try {
       // Get class_id from hardcoded mapping
       const class_id = classIdMap[roomNumber]
-      
       if (!class_id) {
-        throw new Error(`Class "${roomNumber}" not found. Available classes: ${Object.keys(classIdMap).join(", ")}`)
+        throw new Error(`Class \"${roomNumber}\" not found. Available classes: ${Object.keys(classIdMap).join(", ")}`)
       }
 
       // Build URL with query parameters
@@ -72,34 +95,14 @@ export default function HistoryPage() {
       url.searchParams.append("start_time_str", startTime)
       url.searchParams.append("end_time_str", endTime)
 
-      console.log("Fetching attendance with URL:", url.toString())
-
-      const response = await fetch(url, {
-        method: "GET",
-      })
-
-      console.log("Response status:", response.status)
-      console.log("Response ok:", response.ok)
-
+      const response = await fetch(url, { method: "GET" })
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ detail: "Failed to fetch attendance data" }))
-        console.error("Error response:", errorData)
         throw new Error(errorData.detail || `Server error: ${response.status}`)
       }
-
       const data: ApiResponse = await response.json()
-      console.log("Received data:", data)
-      console.log("Attendees array:", data.attendees)
-      console.log("Attendees length:", data.attendees?.length || 0)
-      
-      // Check if attendees exist but might be in different format
-      if (!data.attendees || data.attendees.length === 0) {
-        console.warn("No attendees found in response. Full response:", JSON.stringify(data, null, 2))
-      }
-      
       setApiData(data)
     } catch (err) {
-      console.error("Error fetching attendance:", err)
       setError(err instanceof Error ? err.message : "An error occurred")
       setApiData(null)
     } finally {
@@ -107,9 +110,67 @@ export default function HistoryPage() {
     }
   }
 
+  // Function to fetch attendance data by subject (by schedule)
+  const fetchAttendanceBySubject = async () => {
+    if (!selectedSubject || !subjectDate) {
+      setError("Please select subject and date")
+      return
+    }
+    setLoading(true)
+    setError(null)
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+      if (!token) throw new Error("No access token. Please login again.");
+
+      // Kirim course_name (nama_mk) dan meeting_date
+      const url = new URL("http://localhost:8000/attendance/attendance/report/by-schedule");
+      url.searchParams.append("course_name", selectedSubject);
+      url.searchParams.append("meeting_date", subjectDate);
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      let errorText = "";
+      if (!response.ok) {
+        try {
+          const errorData = await response.json();
+          errorText = errorData.detail || JSON.stringify(errorData);
+        } catch (e) {
+          errorText = `Server error: ${response.status}`;
+        }
+        throw new Error(errorText);
+      }
+      const data: ApiResponse = await response.json();
+      setApiData(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setApiData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Filter attendees by category
   const mahasiswaData = apiData?.attendees.filter((a) => a.category === "Mahasiswa") || []
   const visitorData = apiData?.attendees.filter((a) => a.category === "Visitor") || []
+
+  // Reset search result when switching mode
+  useEffect(() => {
+    setApiData(null);
+    setError(null);
+    setStudentPage(1);
+    setVisitorPage(1);
+  }, [filterMode]);
+
+  // Helper: format timestamp to HH:mm using UTC
+  const pad2Local = (n: number) => n.toString().padStart(2, "0");
+  const formatTimestampToHHMM = (ts?: string) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    return `${pad2Local(d.getUTCHours())}:${pad2Local(d.getUTCMinutes())}`;
+  };
 
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-12">
@@ -149,7 +210,18 @@ export default function HistoryPage() {
               <>
                 <div className="space-y-3">
                   <Label className="text-sm font-bold text-slate-900">Subject Name</Label>
-                  <Input placeholder="Select Subject" className="h-12 rounded-xl bg-slate-50 border-slate-200" />
+                  <select
+                    className="h-12 rounded-xl bg-slate-50 border-slate-200 w-full px-3 text-base"
+                    value={selectedSubject}
+                    onChange={e => setSelectedSubject(e.target.value)}
+                  >
+                    <option value="">Select Subject</option>
+                    {subjects.map((subj, idx) => (
+                      <option key={subj.class_id || idx} value={subj.nama_mk}>
+                        {subj.nama_mk} ({subj.waktu_mulai}-{subj.waktu_selesai})
+                      </option>
+                    ))}
+                  </select>
                   <p className="text-xs text-slate-400 font-medium">Choose from the available subjects</p>
                 </div>
                 <div className="space-y-3">
@@ -158,8 +230,10 @@ export default function HistoryPage() {
                     placeholder="Select Date"
                     type="date"
                     className="h-12 rounded-xl bg-slate-50 border-slate-200"
+                    value={subjectDate}
+                    onChange={e => setSubjectDate(e.target.value)}
                   />
-                  <p className="text-xs text-slate-400 font-medium">Format: MM/DD/YYYY</p>
+                  <p className="text-xs text-slate-400 font-medium">Format: DD-MM-YYYY</p>
                 </div>
               </>
             ) : (
@@ -170,7 +244,7 @@ export default function HistoryPage() {
                     placeholder="Enter Class Name (e.g., 101)" 
                     className="h-12 rounded-xl bg-slate-50 border-slate-200"
                     value={roomNumber}
-                    onChange={(e) => setRoomNumber(e.target.value)}
+                    onChange={e => setRoomNumber(e.target.value || "")}
                   />
                   <p className="text-xs text-slate-400 font-medium">Enter class name to fetch attendance</p>
                 </div>
@@ -181,9 +255,9 @@ export default function HistoryPage() {
                     type="date"
                     className="h-12 rounded-xl bg-slate-50 border-slate-200"
                     value={specificDate}
-                    onChange={(e) => setSpecificDate(e.target.value)}
+                    onChange={e => setSpecificDate(e.target.value || "")}
                   />
-                  <p className="text-xs text-slate-400 font-medium">Format: YYYY-MM-DD</p>
+                  <p className="text-xs text-slate-400 font-medium">Format: DD-MM-YYYY</p>
                 </div>
                 <div className="space-y-3">
                   <Label className="text-sm font-bold text-slate-900">Start Time</Label>
@@ -192,7 +266,7 @@ export default function HistoryPage() {
                     type="time"
                     className="h-12 rounded-xl bg-slate-50 border-slate-200"
                     value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
+                    onChange={e => setStartTime(e.target.value || "")}
                   />
                   <p className="text-xs text-slate-400 font-medium">Enter the start time</p>
                 </div>
@@ -203,7 +277,7 @@ export default function HistoryPage() {
                     type="time"
                     className="h-12 rounded-xl bg-slate-50 border-slate-200"
                     value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
+                    onChange={e => setEndTime(e.target.value || "")}
                   />
                   <p className="text-xs text-slate-400 font-medium">Enter the end time</p>
                 </div>
@@ -221,6 +295,17 @@ export default function HistoryPage() {
               </Button>
             </div>
           )}
+          {filterMode === "subject" && (
+            <div className="flex justify-end pt-4">
+              <Button
+                onClick={fetchAttendanceBySubject}
+                disabled={loading}
+                className="bg-slate-900 hover:bg-slate-800 text-white font-bold px-8 py-3 rounded-xl"
+              >
+                {loading ? "Loading..." : "Search Attendance"}
+              </Button>
+            </div>
+          )}
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm font-medium">
               {error}
@@ -229,7 +314,7 @@ export default function HistoryPage() {
         </Card>
       </div>
 
-      {filterMode === "room" && apiData && (
+      {filterMode === "room" && apiData && !error && (
         <>
           <div className="space-y-6 max-w-3xl mx-auto">
             <div className="bg-slate-100 rounded-xl p-6 space-y-2">
@@ -270,7 +355,7 @@ export default function HistoryPage() {
                       : "text-slate-600 hover:text-slate-900",
                   )}
                 >
-                  Mahasiswa ({mahasiswaData.length})
+                  Student ({mahasiswaData.length})
                 </button>
                 <button
                   onClick={() => setActiveLogType("visitor")}
@@ -285,28 +370,14 @@ export default function HistoryPage() {
                 </button>
               </div>
             </div>
-            <div className="grid gap-4">
-              {activeLogType === "student" ? (
-                <LogSummaryCard
-                  title="Mahasiswa Logs"
-                  description="Here are the attendance records for Mahasiswa."
-                  tags={["Time", "Photo", "Name"]}
-                />
-              ) : (
-                <LogSummaryCard
-                  title="Visitor Logs"
-                  description="Here are the attendance records for Visitors."
-                  tags={["Time", "Photo", "Name"]}
-                />
-              )}
-            </div>
+            {/* Log summary cards removed as requested */}
           </div>
 
           <div className="space-y-8">
             {activeLogType === "student" ? (
               <AttendanceTableDynamic
                 title="Mahasiswa Attendance Records"
-                headers={["MAHASISWA NAME", "TIME IN", "ID"]}
+                headers={["MAHASISWA NAME", "TIME IN"]}
                 data={mahasiswaData}
                 currentPage={studentPage}
                 onPageChange={setStudentPage}
@@ -314,7 +385,7 @@ export default function HistoryPage() {
             ) : (
               <AttendanceTableDynamic
                 title="Visitor Records"
-                headers={["VISITOR NAME", "TIME IN", "ID"]}
+                headers={["VISITOR NAME", "TIME IN"]}
                 data={visitorData}
                 currentPage={visitorPage}
                 onPageChange={setVisitorPage}
@@ -324,9 +395,34 @@ export default function HistoryPage() {
         </>
       )}
 
-      {filterMode === "subject" && (
+      {filterMode === "subject" && apiData && !error && (
         <>
           <div className="space-y-6 max-w-3xl mx-auto">
+            <div className="bg-slate-100 rounded-xl p-6 space-y-2">
+              <h3 className="text-lg font-bold text-slate-900">Search Summary</h3>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-slate-600">Scenario:</span>
+                  <span className="font-bold text-slate-900 ml-2">{apiData.scenario}</span>
+                </div>
+                <div>
+                  <span className="text-slate-600">Total Attendance:</span>
+                  <span className="font-bold text-slate-900 ml-2">{apiData.total_attendance}</span>
+                </div>
+                <div>
+                  <span className="text-slate-600">Start Time:</span>
+                  <span className="font-bold text-slate-900 ml-2">
+                    {new Date(apiData.start_time).toLocaleString()}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-600">End Time:</span>
+                  <span className="font-bold text-slate-900 ml-2">
+                    {new Date(apiData.end_time).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            </div>
             <h2 className="text-3xl font-bold tracking-tight text-slate-900">Search Results</h2>
             <div className="flex justify-center mb-8">
               <div className="inline-flex p-1 bg-slate-200/50 rounded-xl">
@@ -339,7 +435,7 @@ export default function HistoryPage() {
                       : "text-slate-600 hover:text-slate-900",
                   )}
                 >
-                  Student Logs
+                  Student ({mahasiswaData.length})
                 </button>
                 <button
                   onClick={() => setActiveLogType("visitor")}
@@ -350,38 +446,22 @@ export default function HistoryPage() {
                       : "text-slate-600 hover:text-slate-900",
                   )}
                 >
-                  Visitor Logs
+                  Visitor ({visitorData.length})
                 </button>
               </div>
             </div>
-            <div className="grid gap-4">
-              {activeLogType === "student" ? (
-                <LogSummaryCard
-                  title="Student Logs"
-                  description="Here are the attendance records for students."
-                  tags={["Time", "Photo", "Name"]}
-                />
-              ) : (
-                <LogSummaryCard
-                  title="Guest / Visitor Logs"
-                  description="Here are the attendance records for guests and visitors."
-                  tags={["Time", "Photo", "Name", "Purpose"]}
-                />
-              )}
-            </div>
+            {/* Log summary cards removed as requested */}
           </div>
 
           <div className="space-y-8">
             {activeLogType === "student" ? (
               <AttendanceTable
                 title="Student Attendance Records"
-                headers={["STUDENT NAME", "TIME IN", "STUDENT ID"]}
-                data={[
-                  { name: "Andi Saputra", time: "07:58 AM", id: "10115023" },
-                  { name: "Budi Santoso", time: "08:00 AM", id: "10115024" },
-                  { name: "Citra Lestari", time: "07:55 AM", id: "10115025" },
-                  { name: "Dewi Kartika", time: "08:05 AM", id: "10115026" },
-                ]}
+                headers={["STUDENT NAME", "TIME IN"]}
+                data={mahasiswaData.length > 0 ? mahasiswaData.map((m) => ({
+                  name: m.full_name,
+                  time: formatTimestampToHHMM(m.timestamp),
+                })) : [{ name: "", time: "", id: "" }]}
                 currentPage={studentPage}
                 onPageChange={setStudentPage}
               />
@@ -389,12 +469,10 @@ export default function HistoryPage() {
               <AttendanceTable
                 title="Guest/Visitors Records"
                 headers={["GUEST/VISITOR NAME", "TIME IN"]}
-                data={[
-                  { name: "Visitor 1", time: "09:15 AM" },
-                  { name: "Visitor 2", time: "10:30 AM" },
-                  { name: "Visitor 3", time: "11:45 AM" },
-                  { name: "Visitor 4", time: "13:20 PM" },
-                ]}
+                data={visitorData.length > 0 ? visitorData.map((v) => ({
+                  name: v.full_name,
+                  time: formatTimestampToHHMM(v.timestamp),
+                })) : [{ name: "", time: "", id: "" }]}
                 currentPage={visitorPage}
                 onPageChange={setVisitorPage}
               />
@@ -446,20 +524,31 @@ function AttendanceTableDynamic({
   currentPage: number
   onPageChange: (page: number) => void
 }) {
-  const itemsPerPage = 10
+  const itemsPerPage = 5
   const totalPages = Math.ceil(data.length / itemsPerPage)
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
-  const currentData = data.slice(startIndex, endIndex)
+  const currentData = data.slice(startIndex, endIndex);
 
+  // Sort data by timestamp ascending, then page-slice
+  const sorted = data.slice().sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return ta - tb;
+  });
+  const currentDataSorted = sorted.slice(startIndex, endIndex);
+
+  // Format time from timestamp using UTC components (HH:mm) to avoid timezone shifts
+  const pad2 = (n: number) => n.toString().padStart(2, "0");
   const formatTime = (timestamp: string) => {
-    const date = new Date(timestamp)
-    return date.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-    })
-  }
+    if (!timestamp) return "";
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    // Use UTC hours/minutes so the displayed HH matches the backend ISO time (with Z)
+    const hh = pad2(date.getUTCHours());
+    const mm = pad2(date.getUTCMinutes());
+    return `${hh}:${mm}`;
+  };
 
   if (data.length === 0) {
     return (
@@ -469,13 +558,18 @@ function AttendanceTableDynamic({
           <p className="text-slate-500 font-medium">No attendance records found</p>
         </div>
       </div>
-    )
+    );
   }
 
   return (
     <div className="space-y-6">
       <h2 className="text-3xl font-bold tracking-tight text-slate-900">{title}</h2>
-      <div className="bg-[#1e293b] rounded-xl overflow-hidden shadow-2xl">
+      {/* keep a consistent min-height so header + 5 rows fit exactly and avoid layout jump */}
+      { /* approximate header + rows height */ }
+      <div
+        className="bg-[#1e293b] rounded-xl overflow-hidden shadow-2xl"
+        style={{ minHeight: `${72 + itemsPerPage * 62}px` }}
+      >
         <table className="w-full text-left">
           <thead>
             <tr className="border-b border-slate-700/50">
@@ -487,21 +581,12 @@ function AttendanceTableDynamic({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700/30">
-            {currentData.map((row, i) => (
+            {currentDataSorted.map((row) => (
               <tr key={row._id} className="hover:bg-slate-800/30 transition-colors">
                 <td className="px-8 py-4">
-                  <div className="flex items-center gap-4">
-                    <Avatar className="h-10 w-10 border-2 border-slate-700">
-                      <AvatarImage src={`/avatar-${i}.jpg`} />
-                      <AvatarFallback>
-                        <User />
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="font-bold text-slate-100 text-lg">{row.full_name}</span>
-                  </div>
+                  <span className="font-bold text-slate-100 text-lg">{row.full_name}</span>
                 </td>
                 <td className="px-8 py-4 text-slate-300 text-lg font-medium">{formatTime(row.timestamp)}</td>
-                <td className="px-8 py-4 text-slate-300 text-lg font-medium">{row._id}</td>
               </tr>
             ))}
           </tbody>
@@ -561,7 +646,7 @@ function AttendanceTableDynamic({
         </div>
       )}
     </div>
-  )
+  );
 }
 
 function AttendanceTable({
@@ -577,10 +662,20 @@ function AttendanceTable({
   currentPage: number
   onPageChange: (page: number) => void
 }) {
+  // Pagination logic for AttendanceTable
+  const itemsPerPage = 5;
+  const totalPages = Math.ceil(data.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentData = data.slice(startIndex, endIndex);
+
+  // Dynamic min-height for table to avoid scrolling when fewer rows
+  const minTableHeight = `${itemsPerPage * 60}px`; // 60px per row
+
   return (
     <div className="space-y-6">
       <h2 className="text-3xl font-bold tracking-tight text-slate-900">{title}</h2>
-      <div className="bg-[#1e293b] rounded-xl overflow-hidden shadow-2xl">
+      <div className="bg-[#1e293b] rounded-xl overflow-hidden shadow-2xl" style={{ minHeight: minTableHeight }}>
         <table className="w-full text-left">
           <thead>
             <tr className="border-b border-slate-700/50">
@@ -592,74 +687,72 @@ function AttendanceTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700/30">
-            {data.map((row, i) => (
+            {currentData.map((row, i) => (
               <tr key={i} className="hover:bg-slate-800/30 transition-colors">
                 <td className="px-8 py-4">
-                  <div className="flex items-center gap-4">
-                    <Avatar className="h-10 w-10 border-2 border-slate-700">
-                      <AvatarImage src={`/student-.jpg?height=40&width=40&query=student-${i}`} />
-                      <AvatarFallback>
-                        <User />
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="font-bold text-slate-100 text-lg">{row.name}</span>
-                  </div>
+                  <span className="font-bold text-slate-100 text-lg">{row.name}</span>
                 </td>
                 <td className="px-8 py-4 text-slate-300 text-lg font-medium">{row.time}</td>
-                {row.id && <td className="px-8 py-4 text-slate-300 text-lg font-medium">{row.id}</td>}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <div className="flex justify-center pt-4">
-        <div className="flex items-center gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-blue-600 font-bold hover:bg-blue-50"
-            onClick={() => onPageChange(Math.max(1, currentPage - 1))}
-            disabled={currentPage === 1}
-          >
-            <ChevronLeft className="h-4 w-4 mr-1" /> Back
-          </Button>
-          <div className="flex gap-1">
-            {[1, 2, 3, 4].map((p) => (
-              <Button
-                key={p}
-                variant={p === currentPage ? "default" : "ghost"}
-                size="icon"
-                className={cn(
-                  "h-8 w-8 text-xs font-bold rounded-lg",
-                  p === currentPage ? "bg-blue-600 text-white" : "text-slate-400",
-                )}
-                onClick={() => onPageChange(p)}
-              >
-                {p}
-              </Button>
-            ))}
-            <span className="px-2 text-slate-300">...</span>
+      {totalPages > 1 && (
+        <div className="flex justify-center pt-4">
+          <div className="flex items-center gap-2 bg-white p-2 rounded-xl shadow-sm border border-slate-100">
             <Button
               variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-xs font-bold text-slate-400"
-              onClick={() => onPageChange(12)}
+              size="sm"
+              className="text-blue-600 font-bold hover:bg-blue-50"
+              onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+              disabled={currentPage === 1}
             >
-              12
+              <ChevronLeft className="h-4 w-4 mr-1" /> Back
+            </Button>
+            <div className="flex gap-1">
+              {Array.from({ length: Math.min(4, totalPages) }, (_, i) => i + 1).map((p) => (
+                <Button
+                  key={p}
+                  variant={p === currentPage ? "default" : "ghost"}
+                  size="icon"
+                  className={cn(
+                    "h-8 w-8 text-xs font-bold rounded-lg",
+                    p === currentPage ? "bg-blue-600 text-white" : "text-slate-400",
+                  )}
+                  onClick={() => onPageChange(p)}
+                >
+                  {p}
+                </Button>
+              ))}
+              {totalPages > 4 && (
+                <>
+                  <span className="px-2 text-slate-300">...</span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-xs font-bold text-slate-400"
+                    onClick={() => onPageChange(totalPages)}
+                  >
+                    {totalPages}
+                  </Button>
+                </>
+              )}
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-blue-600 font-bold hover:bg-blue-50"
+              onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
+              disabled={currentPage === totalPages}
+            >
+              Next <ChevronRight className="h-4 w-4 ml-1" />
             </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-blue-600 font-bold hover:bg-blue-50"
-            onClick={() => onPageChange(currentPage + 1)}
-          >
-            Next <ChevronRight className="h-4 w-4 ml-1" />
-          </Button>
         </div>
-      </div>
+      )}
     </div>
-  )
+  );
 }
 
 import { cn } from "@/lib/utils"
