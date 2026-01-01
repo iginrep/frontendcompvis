@@ -32,7 +32,7 @@ const generateObjectId = () => {
 
 export default function MonitorPage() {
   const [isLive, setIsLive] = useState(false)
-  const [logs, setLogs] = useState<any[]>([])
+  const [currentDetections, setCurrentDetections] = useState<any[]>([])
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -40,6 +40,34 @@ export default function MonitorPage() {
   const captureIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const isLiveRef = useRef<boolean>(false)
+
+  // Fetch user name by ID
+  const fetchUserName = async (userId: string): Promise<string> => {
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/users/${userId}`)
+      if (response.ok) {
+        const data = await response.json()
+        return data.name || `User ${userId.substring(0, 8)}`
+      }
+    } catch (error) {
+      console.error('Error fetching user name:', error)
+    }
+    return `User ${userId.substring(0, 8)}`
+  }
+
+  // Fetch visitor name by ID
+  const fetchVisitorName = async (visitorId: string): Promise<string> => {
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/users/visitor/${visitorId}`)
+      if (response.ok) {
+        const data = await response.json()
+        return data.name || `Visitor ${visitorId.substring(0, 8)}`
+      }
+    } catch (error) {
+      console.error('Error fetching visitor name:', error)
+    }
+    return `Visitor ${visitorId.substring(0, 8)}`
+  }
 
   // Capture and send frame to API
   const captureAndSendFrame = async () => {
@@ -69,7 +97,7 @@ export default function MonitorPage() {
           const base64String = (reader.result as string).split(',')[1]
 
           try {
-            const response = await fetch('http://127.0.0.1:7000/face/uploadmany', {
+            const response = await fetch('http://127.0.0.1:8000/face/uploadmany', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -88,6 +116,7 @@ export default function MonitorPage() {
                 updateLogs(data.results)
               } else {
                 clearBoundingBoxes()
+                setCurrentDetections([])
               }
             }
           } catch (error) {
@@ -130,19 +159,36 @@ export default function MonitorPage() {
       const scaledWidth = width * scaleX
       const scaledHeight = height * scaleY
 
-      // Determine color: Green for student (user_id), Yellow for visitor
-      const color = result.user_id ? '#22c55e' : '#eab308'
+      // Determine color and label
+      let color = '#eab308' // Yellow default for visitor
+      let label = ''
+      
+      if (result.user_id) {
+        // Student: Green with similarity
+        color = '#22c55e'
+        label = `Similarity: ${result.distance.toFixed(3)}`
+      } else if (result.visitor_id) {
+        // Check if distance is NULL (new visitor)
+        if (result.distance === null || result.distance === undefined) {
+          // New visitor: Green with "NEW"
+          color = '#22c55e'
+          label = 'NEW'
+        } else {
+          // Known visitor: Yellow with similarity
+          color = '#eab308'
+          label = `Similarity: ${result.distance.toFixed(3)}`
+        }
+      }
       
       // Draw bounding box
       ctx.strokeStyle = color
       ctx.lineWidth = 3
       ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight)
 
-      // Draw similarity score
-      const score = (1 - result.distance).toFixed(2)
+      // Draw label
       ctx.fillStyle = color
       ctx.font = 'bold 14px sans-serif'
-      ctx.fillText(`Score: ${score}`, scaledX, scaledY - 5)
+      ctx.fillText(label, scaledX, scaledY - 5)
     })
   }
 
@@ -154,24 +200,37 @@ export default function MonitorPage() {
     }
   }
 
-  // Update logs with detection results
-  const updateLogs = (results: DetectionResult[]) => {
-    const newLogs = results.map((result) => {
-      const currentTime = new Date().toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
+  // Update current detections (not logs)
+  const updateLogs = async (results: DetectionResult[]) => {
+    const detections = await Promise.all(
+      results.map(async (result, index) => {
+        let name = ''
+        let type = ''
+        let distance = 'NULL'
+        
+        if (result.user_id) {
+          const userName = await fetchUserName(result.user_id)
+          name = userName
+          type = 'Student'
+          distance = result.distance.toFixed(3)
+        } else if (result.visitor_id) {
+          const visitorName = await fetchVisitorName(result.visitor_id)
+          name = visitorName
+          type = 'Visitor'
+          // Check if distance exists (recognized visitor) or NULL (new visitor)
+          distance = result.distance !== null && result.distance !== undefined ? result.distance.toFixed(3) : 'NULL'
+        }
+
+        return {
+          id: index,
+          name,
+          type,
+          distance,
+        }
       })
+    )
 
-      return {
-        name: result.user_id ? 'Student Detected' : 'Visitor Detected',
-        time: currentTime,
-        type: result.user_id ? 'Student' : 'Visitor',
-        similarityScore: (1 - result.distance).toFixed(2),
-        faceDetected: true,
-      }
-    })
-
-    setLogs((prev) => [...newLogs, ...prev].slice(0, 10))
+    setCurrentDetections(detections)
   }
 
   const startCamera = async () => {
@@ -218,8 +277,9 @@ export default function MonitorPage() {
       videoRef.current.srcObject = null
     }
     
-    // Clear canvases
+    // Clear canvases and detections
     clearBoundingBoxes()
+    setCurrentDetections([])
     
     setIsLive(false)
   }
@@ -288,34 +348,35 @@ export default function MonitorPage() {
       </div>
 
       <div className="space-y-6">
-        <h2 className="text-4xl font-bold tracking-tight text-slate-900">Live Detection Log</h2>
+        <h2 className="text-4xl font-bold tracking-tight text-slate-900">Currently Detected</h2>
         <div className="space-y-3">
-          {logs.length === 0 ? (
+          {currentDetections.length === 0 ? (
             <div className="text-center py-12 text-slate-400">
               <User className="h-16 w-16 mx-auto mb-4 opacity-30" />
-              <p className="text-lg font-medium">No detections yet</p>
+              <p className="text-lg font-medium">No faces detected</p>
               <p className="text-sm">Start the camera to begin face detection</p>
             </div>
           ) : (
-            logs.map((log, i) => (
-              <Card key={i} className="overflow-hidden border-slate-200/60 hover:border-slate-300 transition-colors">
+            currentDetections.map((detection) => (
+              <Card key={detection.id} className="overflow-hidden border-slate-200/60 hover:border-slate-300 transition-colors">
                 <CardContent className="p-4 flex gap-4 items-center">
                   <div className="h-20 w-20 bg-slate-100 rounded-lg flex items-center justify-center border border-slate-200">
                     <User className="h-10 w-10 text-slate-300" />
                   </div>
                   <div className="flex-1 space-y-1">
-                    <h3 className="font-bold text-lg text-slate-900">{log.name}</h3>
-                    <p className="text-sm text-slate-500 font-medium italic">Similarity Score: {log.similarityScore}</p>
-                    <p className="text-sm text-slate-600 font-semibold">Time: {log.time}</p>
+                    <h3 className="font-bold text-lg text-slate-900">{detection.name}</h3>
+                    <p className="text-sm text-slate-500 font-medium italic">
+                      Distance: <span className="font-bold">{detection.distance}</span>
+                    </p>
                     <Badge 
                       variant="secondary" 
                       className={`font-bold px-3 py-0.5 border-none ${
-                        log.type === 'Student' 
+                        detection.type === 'Student' 
                           ? 'bg-green-100 text-green-700' 
                           : 'bg-yellow-100 text-yellow-700'
                       }`}
                     >
-                      {log.type}
+                      {detection.type}
                     </Badge>
                   </div>
                 </CardContent>
